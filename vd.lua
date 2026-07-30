@@ -1,4 +1,3 @@
-
 if not game:IsLoaded() then game.Loaded:Wait() end
 local Players=game:GetService("Players")
 while not Players.LocalPlayer do task.wait() end
@@ -164,7 +163,7 @@ getgenv().isMobileFiring   = false
 getgenv().AIFinalTarget    = nil
 getgenv().CachedWaypoints  = nil
 getgenv().AntiAura = false
-getgenv().AuraRemoteCache = {}
+getgenv().AuraRemoteCache = setmetatable({}, { __mode = "k" })
 -- Nonaktifkan namecall hook lama (anti-stacking)
 getgenv().FORKT_NamecallId = (getgenv().FORKT_NamecallId or 0) + 1
 -- Cleanup fppHideConn lama yang tidak ditrack di FORKT_CONNECTIONS
@@ -235,11 +234,26 @@ local t_remove = table.remove
 local m_floor = math.floor
 local m_round = math.round
 local s_format = string.format
+-- Gunakan table.clear() BUKAN {} untuk mencegah penumpukan tabel di RAM
+local function ClearMapCache()
+    table.clear(CachedMapObjects.Generators)
+    table.clear(CachedMapObjects.Pallets)
+    table.clear(CachedMapObjects.Hooks)
+    table.clear(CachedMapObjects.Gates)
+    
+    if ActiveGenerators then table.clear(ActiveGenerators) end
 
+    if PrevESPState then
+        PrevESPState.Generator = false
+        PrevESPState.Hook = false
+        PrevESPState.Pallet = false
+        PrevESPState.Gate = false
+    end
+end
 local function UpdateMapCache()
     local map = workspace:FindFirstChild("Map")
     if not map then return end
-    
+    ClearMapCache()
     CachedMapObjects.Generators = {}
     CachedMapObjects.Pallets = {}
     CachedMapObjects.Hooks = {}
@@ -410,7 +424,7 @@ local ParryDistance=10
 local GenConnection=nil
 local SpeedBoost=false
 local Aimbot=false
-local TargetPartCache={}
+local TargetPartCache=setmetatable({}, { __mode = "k" })
 local WallCheck=true
 local ShowFOVCircle=false
 
@@ -595,7 +609,7 @@ do
     SCPFolder.Name = "SCP_ESP"
     SCPFolder.Parent = CoreGui
 
-    local SCPCache = {}
+    local SCPCache = setmetatable({}, { __mode = "k" })
     local SCPConnection
 
     local function RemoveSCP(model)
@@ -1539,7 +1553,7 @@ local function IsStatusActive(val)
 end
 
 -- Cache mesh parts tiap hook agar tidak GetDescendants() setiap refresh
-local HookMeshCache = {}
+local HookMeshCache = setmetatable({}, { __mode = "k" })
 
 local function RefreshESP()
     if not workspace.CurrentCamera then return end
@@ -1762,6 +1776,9 @@ local function RefreshESP()
     end
 end
 
+-- =========================================================
+-- UTILITY: OPTIMIZED RAYCAST (HANYA DITULIS 1 KALI)
+-- =========================================================
 local cachedRayFilter = {}
 local globalRayParams = RaycastParams.new()
 globalRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1770,15 +1787,14 @@ local function IsVisible(targetPart)
     if not WallCheck then return true end
     
     local cam = workspace.CurrentCamera
-    if not cam then return true end
+    if not cam or not targetPart then return true end
     
     local origin = cam.CFrame.Position
     local direction = (targetPart.Position - origin)
     local myChar = LocalPlayer.Character
     
-    -- Bersihkan dan isi ulang filter tanpa membuat instance tabel baru
     table.clear(cachedRayFilter)
-    if cam then table.insert(cachedRayFilter, cam) end
+    table.insert(cachedRayFilter, cam)
     if myChar then table.insert(cachedRayFilter, myChar) end
     
     globalRayParams.FilterDescendantsInstances = cachedRayFilter
@@ -1790,6 +1806,7 @@ local function IsVisible(targetPart)
     
     return true
 end
+
 local function ResetScope()
 
     local char=LocalPlayer.Character
@@ -4624,7 +4641,7 @@ local SILENT_KEYWORDS = {"noise", "scream", "vaultalert", "spotted", "alert", "p
 local AURA_KEYWORDS = {"aura", "reveal", "highlight", "sense", "spotted", "vision", "radar", "detect", "tracking", "hunter"}
 
 local myHookId = getgenv().FORKT_NamecallId
-local RemoteNameCache = {} -- Cache nama remote untuk menghindari pemanggilan string.lower() berulang
+local RemoteNameCache =  setmetatable({}, { __mode = "k" })
 
 local oldNamecall
 oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
@@ -4835,7 +4852,7 @@ do
     end)
 end
 ----------------------------------------------------------------
--- AUTO PARRY (STABLE REWRITE)
+-- AUTO PARRY (STABLE REWRITE & OPTIMIZED)
 ----------------------------------------------------------------
 do
     local IgnoreSkills = {
@@ -4853,44 +4870,32 @@ do
         Cure        = { BonusDist = 2.0, Delay = 0.03 },
     }
 
-    local ExactParryRemote = nil
-    local LastParryTick    = 0      -- [FIX] konsisten pakai os.clock()
-    local CFG_Cooldown     = 0.30   -- [FIX] 0.08 → 0.30 (lebih stabil, kurang spam)
+    local LastParryTick    = 0      
+    local CFG_Cooldown     = 0.30   
     local CFG_MaxVelocity  = 32
     local CFG_Prediction   = true
 
-    -- [FIX] Cache RaycastParams di luar loop agar tidak buat baru setiap call
+    -- Cache RaycastParams di luar loop
     local parryRayParams = RaycastParams.new()
     parryRayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-    local function GetParryRemote()
-        if ExactParryRemote and ExactParryRemote.Parent then
-            return ExactParryRemote
-        end
-        ExactParryRemote = nil  -- [FIX] Reset cache basi dulu
+    local CachedParryRemote = nil
 
+    local function GetParryRemoteFast()
+        if CachedParryRemote and CachedParryRemote.Parent then 
+            return CachedParryRemote 
+        end
+        
         local remotes = ReplicatedStorage:FindFirstChild("Remotes")
         if not remotes then return nil end
-
-        local items  = remotes:FindFirstChild("Items")
-        local dagger = items and items:FindFirstChild("Parrying Dagger")
-        if dagger then
-            local r = dagger:FindFirstChild("parry")
-                   or dagger:FindFirstChild("Parry")
-                   or dagger:FindFirstChildOfClass("RemoteEvent")
-            if r then ExactParryRemote = r; return r end
-        end
-
-        for _, v in ipairs(remotes:GetDescendants()) do
-            if v:IsA("RemoteEvent") then
-                local nm = v.Name:lower()
-                if nm == "parry" or nm == "daggerparry" or nm == "parryevent" then
-                    ExactParryRemote = v
-                    return v
-                end
-            end
-        end
-        return nil
+    
+        -- Perbaikan pencarian rekursif menggunakan 'or' agar akurat
+        CachedParryRemote = remotes:FindFirstChild("Parrying Dagger", true) 
+            or remotes:FindFirstChild("parry", true)
+            or remotes:FindFirstChild("ParryEvent", true)
+            or remotes:FindFirstChild("DaggerParry", true)
+    
+        return CachedParryRemote
     end
 
     local function GetPing()
@@ -4960,7 +4965,7 @@ do
     end
 
     TriggerParryDagger = function()
-        local now = os.clock()  -- [FIX] konsisten pakai os.clock()
+        local now = os.clock()  
         if now - LastParryTick < CFG_Cooldown then return end
         if not IsSurvivorTeam(LocalPlayer) then return end
 
@@ -4969,7 +4974,7 @@ do
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
         if not (root and hum) or hum.Health <= 0 then return end
 
-        -- [FIX] Skip jika player sedang immobilized
+        -- Skip jika player sedang immobilized
         if GetGameValue(char, "IsHooked")
         or GetGameValue(char, "Carried")
         or GetGameValue(char, "Knocked")
@@ -4978,7 +4983,8 @@ do
 
         if not HasParryTool(char) then return end
 
-        local remote = GetParryRemote()
+        -- Memanggil fungsi GetParryRemoteFast yang sudah dioptimalkan
+        local remote = GetParryRemoteFast()
         if not remote then return end
 
         local ping       = GetPing()
@@ -5011,7 +5017,7 @@ do
                 predictPos = predictPos + clampedVel * (ping + strict * 0.045)
             end
 
-            -- [FIX] Pakai cached RaycastParams, update filter saja
+            -- Pakai cached RaycastParams, update filter saja
             parryRayParams.FilterDescendantsInstances = { char, eChar }
             local hit = workspace:Raycast(
                 root.Position,
@@ -5039,7 +5045,6 @@ do
         task.spawn(function()
             if finalDelay > 0 then task.wait(finalDelay) end
 
-            -- [FIX] Burst maksimal 3, bukan 5 (kurangi risiko deteksi/bug animasi)
             local burst = bestDist <= 5 and 1
                        or bestDist <= 8 and 2
                        or 3
@@ -5468,7 +5473,7 @@ end)
 -- STUN DETECTOR (adaptive interval)
 ----------------------------------------------------------------
 -- [WORKER 2] SLOW/DYNAMIC LOOP (Interval Sedang & Variabel: AI Bot, ESP, Stun, & Safety Net)
-local killerStunStates = {} -- Tracking state stun agar tidak spam notifikasi
+local killerStunStates = setmetatable({}, { __mode = "k" })
 
 task.spawn(function()
     while task.wait(0.40) do
